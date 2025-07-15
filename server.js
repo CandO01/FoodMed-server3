@@ -9,6 +9,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { Server } from 'socket.io';
 import { Food } from './models/Food.js'
 import  Request  from './models/Request.js';
+import User from './models/User.js';
 import Message from './models/Message.js';
 import { donationsConnection, chatConnection } from './db.js';
 
@@ -126,6 +127,12 @@ const httpServer = http.createServer(async (req, res) => {
 
       await foodData.save();
 
+      await User.updateOne(
+        { email: fields.donorEmail },
+        { $set: { name: fields.donorName || fields.donorEmail, role: 'donor' } },
+        { upsert: true }
+      );
+
       res.writeHead(201);
       res.end(JSON.stringify({ message: 'Food uploaded successfully', data: foodData }));
     });
@@ -139,8 +146,10 @@ const httpServer = http.createServer(async (req, res) => {
               foodName,
               donorEmail,
               donorId,
+              donorName,
               userId,
               email: userEmail,
+              userName,
               phone
             } = await parseJSONBody(req);
 
@@ -149,20 +158,30 @@ const httpServer = http.createServer(async (req, res) => {
                 res.end(JSON.stringify({ error: 'Missing required fields' }));
                 return;
               }
+
+                 // ✅ Save or update the user who is making the request
+              await User.updateOne(
+                { email: userEmail },
+                { $set: { name: userName || userEmail, email: userEmail, role: 'user' } },
+                { upsert: true }
+              );
+
             const newRequest = new Request({
                     id: uuidv4(),
                     itemId,
                     foodName,
                     donorEmail,
                     donorId: donorId || '',
+                    donorName,
                     userId: userId || '',
                     userEmail,
+                    userName,
                     phone,
                     status: 'pending',
                     createdAt: new Date(),
                   });
 
-               await newRequest.save();
+         await newRequest.save();
          res.writeHead(200, { 'Content-Type': 'application/json' });
          res.end(JSON.stringify({ message: 'Your request has been submitted!' }));
     }
@@ -175,62 +194,50 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   // Updated GET /requests to filter by role and id
-  else if (req.url.startsWith('/requests') && req.method === 'GET') {
-    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
-    const role = parsedUrl.searchParams.get('role');
-    const id = parsedUrl.searchParams.get('id');           // userId or donorId
+    else if (req.url.startsWith('/requests') && req.method === 'GET') {
+            const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+            const role = parsedUrl.searchParams.get('role');
+            const id = parsedUrl.searchParams.get('id');
 
-      if (!role || !id) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'Missing role or id' }));
-        return;
-      }
+            if (!role || !id) {
+              res.writeHead(400);
+              res.end(JSON.stringify({ error: 'Missing role or id' }));
+              return;
+            }
 
-            const filter =
-                role === 'donor'
-                  ? { donorEmail: id }
-                  : { userEmail: id };
+            const filter = role === 'donor'
+              ? { donorEmail: id }
+              : { userEmail: id };
 
-              try {
-                  const requests = await Request.find(filter).lean();
-                  res.writeHead(200, { 'Content-Type': 'application/json' });
-                  if (role === 'user') {
-                    // fetch donor names using donorEmail from food submissions
-                    const allFood = await Food.find().lean();
-
-                    const enrichedRequests = requests.map(req => {
-                      const match = allFood.find(item => item.donorEmail === req.donorEmail);
-                      return {
-                        ...req,
-                        donorName: match?.donorName || req.donorEmail
-                      };
-                    });
-
-                    res.end(JSON.stringify(enrichedRequests));
-                  } 
-                  else if (role === 'donor') {
-                    // enrich userName by fetching from Request collection or users collection (if exists)
-                    // Assuming userName is stored in requests or else fallback to userEmail
-                    const enrichedRequests = requests.map(req => ({
-                      ...req,
-                      userName: req.userName || req.userEmail
-                    }));
-                    res.end(JSON.stringify(enrichedRequests));
-                } 
-                  else {
-                    const enrichedRequests = requests.map(req => ({
-                      ...req,
-                      userName: req.userName || req.userEmail
-                    }));
-                    res.end(JSON.stringify(enrichedRequests));
-                  } 
-                } catch (err) {
-                  console.error('❌ Error fetching requests:', err);
-                  res.writeHead(500);
-                  res.end(JSON.stringify({ error: 'Failed to fetch requests' }));
+            try {
+              const requests = await Request.find(filter).lean();
+              const allUsers = await User.find().lean(); // ✅ FIX: Use User model properly
+              const enrichedRequests = requests.map(req => {
+                if (role === 'donor') {
+                  const user = allUsers.find(u => u.email === req.userEmail);
+                  return {
+                    ...req,
+                    userName: user?.name || req.userEmail,
+                    userPhone: user?.phone || '',
+                  };
+                } else {
+                  const donor = allUsers.find(u => u.email === req.donorEmail);
+                  return {
+                    ...req,
+                    donorName: donor?.name || req.donorEmail,
+                  };
                 }
-      
-      }
+              });
+
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(enrichedRequests));
+            } catch (err) {
+              console.error('❌ Error fetching requests:', err);
+              res.writeHead(500);
+              res.end(JSON.stringify({ error: 'Failed to fetch requests' }));
+            }
+          }
+
 
 
 // === Get All Submissions ===
@@ -253,50 +260,71 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify(items));
       }
 
+      // PATCHING 
 
   else if (req.method === 'PATCH' && req.url.startsWith('/request/update/')) {
-    const id = req.url.split('/').pop();
-    const body = await parseJSONBody(req);
+        const id = req.url.split('/').pop();
+        const body = await parseJSONBody(req);
 
-    const updated = await Request.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          status: 'confirmed',
-          confirmedAt: new Date(),
-          confirmationDetails: {
-            date: body.date,
-            time: body.time,
-            location: body.location
-          }
+        const updated = await Request.findOneAndUpdate(
+          { id },
+          {
+            $set: {
+              status: 'confirmed',
+              confirmedAt: new Date(),
+              confirmationDetails: {
+                date: body.date,
+                time: body.time,
+                location: body.location
+              }
+            }
+          },
+          { new: true }
+        );
+
+        if (!updated) {
+          res.writeHead(404);
+          return res.end(JSON.stringify({ error: 'Request not found' }));
         }
-      },
-      { new: true }
-    );
 
-    if (!updated) {
-      res.writeHead(404);
-      return res.end(JSON.stringify({ error: 'Request not found' }));
-    }
+        
+       // ✅ EMAIL NOTIFICATION
+          if (updated.userEmail) {
+            try {
+              await transporter.sendMail({
+                from: process.env.EMAIL,
+                to: updated.userEmail,
+                subject: '✅ Your Food Request is Confirmed!',
+                text: `Hello, your request for ${updated.foodName} has been confirmed for ${body.date} at ${body.time} in ${body.location}.`
+              });
+              console.log(`📧 Email sent to ${updated.userEmail}`);
+            } catch (err) {
+              console.error(`❌ Failed to send email: ${err.message}`);
+            }
+          } else {
+            console.warn('⚠️ Cannot send email: userEmail is missing');
+          }
 
-    transporter.sendMail({
-      from: process.env.EMAIL,
-      to: updated.email,
-      subject: '✅ Your Food Request is Confirmed!',
-      text: `Hello, your request for ${updated.foodName} has been confirmed for ${body.date} at ${body.time} in ${body.location}.`
-    });
+          // ✅ SMS NOTIFICATION
+          if (updated.phone) {
+            try {
+              await twilioClient.messages.create({
+                body: `FoodMed: Your request for ${updated.foodName} is confirmed for ${body.date}, ${body.time} at ${body.location}.`,
+                from: twilioFrom,
+                to: updated.phone
+              });
+              console.log(`📱 SMS sent to ${updated.phone}`);
+            } catch (err) {
+              console.error(`❌ Failed to send SMS: ${err.message}`);
+            }
+          } else {
+            console.warn('⚠️ Cannot send SMS: phone number is missing');
+          }
 
-    if (updated.phone) {
-      await twilioClient.messages.create({
-        body: `FoodMed: Your request for ${updated.foodName} is confirmed for ${body.date}, ${body.time} at ${body.location}.`,
-        from: twilioFrom,
-        to: updated.phone
-      });
-    }
+        res.writeHead(200);
+        res.end(JSON.stringify({ message: 'Request confirmed and user notified' }));
+      }
 
-    res.writeHead(200);
-    res.end(JSON.stringify({ message: 'Request confirmed and user notified' }));
-  }
 
   else if (req.method === 'DELETE' && req.url.startsWith('/request/delete/')) {
     const id = req.url.split('/').pop();
@@ -313,7 +341,7 @@ const httpServer = http.createServer(async (req, res) => {
 
   // === Get Chat Messages Between Sender and Recipient ===
 else if (req.method === 'GET' && req.url.startsWith('/messages')) {
-  const urlObj = new URL(`http://localhost:3001${req.url}`);
+  const urlObj = new URL(req.url, `http://${req.headers.host}`); 
   const senderId = urlObj.searchParams.get('senderId');
   const recipientId = urlObj.searchParams.get('recipientId');
 

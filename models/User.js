@@ -1,15 +1,14 @@
-// models/User.js
 import mongoose from 'mongoose';
+import { donationsConnection } from '../db.js'; // ✅ use same DB as Food
 
 const userSchema = new mongoose.Schema({
-  name: { type: String, required: true },       // user full name
-  email: { type: String, required: true, unique: true },
-  role: { type: String, required: true },       // e.g. 'user' or 'donor'
-  phone: { type: String },
-  passwordHash: { type: String },                // if you store hashed passwords
-  createdAt: { type: Date, default: Date.now }
+  name: String,
+  email: { type: String, unique: true },
+  role: String,
+  phone: String
 });
 
-const User = mongoose.model('User', userSchema);
+// Register the model on the donationsConnection
+const User = donationsConnection.model('User', userSchema);
 
 export default User;
