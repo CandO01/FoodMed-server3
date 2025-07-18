@@ -353,8 +353,8 @@ else if (req.method === 'GET' && req.url.startsWith('/messages')) {
   try {
     const messages = await Message.find({
       $or: [
-        { sender: senderId, receiver: recipientId },
-        { sender: recipientId, receiver: senderId }
+        { senderId, recipientId },
+        { senderId: recipientId, recipientId: senderId }
       ]
     }).sort({ timestamp: 1 });
 
@@ -401,11 +401,19 @@ const io = new Server(httpServer, {
     io.emit('onlineUsers', onlineUsers);
   });
 
-  socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
-    const message = new Message({ senderId, recipientId, text });
-    await message.save();
-    io.to(recipientId).emit('receiveMessage', message);
-  });
+    socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
+      try {
+        const message = new Message({ senderId, recipientId, text });
+        const savedMessage = await message.save();
+        
+        // Emit to both sender and recipient
+        io.to(senderId).emit('receiveMessage', savedMessage);
+        io.to(recipientId).emit('receiveMessage', savedMessage);
+      } catch (error) {
+        console.error('❌ Failed to save message:', error);
+      }
+    });
+
 
   socket.on('disconnect', () => {
     const userId = socketToUser[socket.id];
