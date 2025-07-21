@@ -384,7 +384,7 @@ const io = new Server(httpServer, {
     let onlineUsers = [];
     const socketToUser = {}; // Map socket.id => userId
 
-   io.on('connection', (socket) => {
+io.on('connection', (socket) => {
   console.log('🟢 A user connected:', socket.id);
 
   socket.on('joinRoom', ({ senderId, recipientId }) => {
@@ -394,26 +394,32 @@ const io = new Server(httpServer, {
 
   socket.on('online', (userId) => {
     socketToUser[socket.id] = userId;
-     socket.join(userId); 
+    socket.join(userId);
     if (!onlineUsers.includes(userId)) {
       onlineUsers.push(userId);
     }
     io.emit('onlineUsers', onlineUsers);
   });
 
-    socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
-      try {
-        const message = new Message({ senderId, recipientId, text });
-        const savedMessage = await message.save();
-        
-        // Emit to both sender and recipient
-        io.to(senderId).emit('receiveMessage', savedMessage);
-        io.to(recipientId).emit('receiveMessage', savedMessage);
-      } catch (error) {
-        console.error('❌ Failed to save message:', error);
-      }
-    });
+  socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
+    try {
+      const message = new Message({ senderId, recipientId, text });
+      const savedMessage = await message.save();
+      io.to(senderId).emit('receiveMessage', savedMessage);
+      io.to(recipientId).emit('receiveMessage', savedMessage);
+    } catch (error) {
+      console.error('❌ Failed to save message:', error);
+    }
+  });
 
+  // ✅ NEW: Typing indicator handlers
+  socket.on('typing', ({ senderId, recipientId }) => {
+    io.to(recipientId).emit('typing', { senderId });
+  });
+
+  socket.on('stopTyping', ({ senderId, recipientId }) => {
+    io.to(recipientId).emit('stopTyping', { senderId });
+  });
 
   socket.on('disconnect', () => {
     const userId = socketToUser[socket.id];
@@ -425,7 +431,6 @@ const io = new Server(httpServer, {
     console.log('🔴 A user disconnected:', socket.id);
   });
 });
-
 
 // Ensure DB connections are ready before starting server
 const waitForConnections = async () => {
