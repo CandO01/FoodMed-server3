@@ -26,6 +26,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = process.env.PORT || 3005;
 
+
+const BASE_API_URL = process.env.BASE_API_URL || 'http://localhost:3005';
+
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const twilioFrom = process.env.TWILIO_PHONE;
 
@@ -129,7 +132,13 @@ const httpServer = http.createServer(async (req, res) => {
 
       await User.updateOne(
         { email: fields.donorEmail },
-        { $set: { name: fields.donorName || fields.donorEmail, role: 'donor' } },
+        { 
+          $set: { 
+            name: fields.donorName || fields.donorEmail, 
+            canDonate: true,
+            canRequest: true 
+          } 
+        },
         { upsert: true }
       );
 
@@ -162,7 +171,13 @@ const httpServer = http.createServer(async (req, res) => {
                  // ✅ Save or update the user who is making the request
               await User.updateOne(
                 { email: userEmail },
-                { $set: { name: userName || userEmail, email: userEmail, role: 'user' } },
+                { 
+                  $set: { 
+                    name: userName || userEmail, email: userEmail, 
+                    canDonate: true, 
+                    canRequest: true 
+                  } 
+                },
                 { upsert: true }
               );
 
@@ -177,11 +192,20 @@ const httpServer = http.createServer(async (req, res) => {
                     userEmail,
                     userName,
                     phone,
-                    status: 'pending',
+                    status: 'Pending',
                     createdAt: new Date(),
                   });
 
          await newRequest.save();
+
+         // ✅ Notify donor in real-time
+        io.to(donorId).emit("receiveMessage", {
+          senderId: userId,
+          text: `${userName} has requested your food: ${foodName}`
+        });
+
+         io.emit('requestUpdated');
+
          res.writeHead(200, { 'Content-Type': 'application/json' });
          res.end(JSON.stringify({ message: 'Your request has been submitted!' }));
     }
@@ -193,27 +217,43 @@ const httpServer = http.createServer(async (req, res) => {
 
   }
 
-  // Updated GET /requests to filter by role and id
+  // Updated GET /requests to filter by type and id
     else if (req.url.startsWith('/requests') && req.method === 'GET') {
             const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
-            const role = parsedUrl.searchParams.get('role');
+           
             const id = parsedUrl.searchParams.get('id');
+            const type = parsedUrl.searchParams.get('type')
 
-            if (!role || !id) {
+            if (!id || !type ) {
               res.writeHead(400);
-              res.end(JSON.stringify({ error: 'Missing role or id' }));
+              res.end(JSON.stringify({ error: 'Missing type or id' }));
               return;
             }
 
-            const filter = role === 'donor'
-              ? { donorEmail: id }
-              : { userEmail: id };
+            // const filter = type === 'donor'
+            //   ? { donorEmail: id }
+            //   : { userEmail: id };
+
+            let filter = {}
+            if(type === 'donor'){
+              filter = { donorEmail: id }
+            }else if(type === 'user'){
+              filter = { userEmail: id }
+            }else if(type === 'both'){
+               filter ={
+                $or: [
+                  { donorEmail: id },
+                  { userEmail: id }
+                ]
+               }
+            }
 
             try {
               const requests = await Request.find(filter).lean();
               const allUsers = await User.find().lean(); // ✅ FIX: Use User model properly
+
               const enrichedRequests = requests.map(req => {
-                if (role === 'donor') {
+                if (type === 'donor') {
                   const user = allUsers.find(u => u.email === req.userEmail);
                   return {
                     ...req,
@@ -225,6 +265,7 @@ const httpServer = http.createServer(async (req, res) => {
                   return {
                     ...req,
                     donorName: donor?.name || req.donorEmail,
+                    donorPhone: donor?.phone || '',
                   };
                 }
               });
@@ -242,7 +283,8 @@ const httpServer = http.createServer(async (req, res) => {
 
 // === Get All Submissions ===
   else if (req.method === 'GET' && req.url.startsWith('/submissions')) {
-        const url = new URL(`http://localhost:3005${req.url}`);
+        // const url = new URL(`http://localhost:3005${req.url}`);
+        const url = new URL(`${BASE_API_URL}${req.url}`);
         const email = url.searchParams.get('email');
         const type = url.searchParams.get('type');
         
@@ -261,7 +303,6 @@ const httpServer = http.createServer(async (req, res) => {
       }
 
       // PATCHING 
-
   else if (req.method === 'PATCH' && req.url.startsWith('/request/update/')) {
         const id = req.url.split('/').pop();
         const body = await parseJSONBody(req);
@@ -376,7 +417,8 @@ else if (req.method === 'GET' && req.url.startsWith('/messages')) {
 
 const io = new Server(httpServer, {
   cors: {
-    origin: '*'
+    origin: '*',
+    methods: ['GET', 'POST'] 
   }
 });
 
@@ -384,14 +426,25 @@ const io = new Server(httpServer, {
     let onlineUsers = [];
     const socketToUser = {}; // Map socket.id => userId
 
+    // ✅ SINGLE COMBINED SOCKET.IO LOGIC
 io.on('connection', (socket) => {
-  console.log('🟢 A user connected:', socket.id);
+  console.log('🟢 User connected:', socket.id);
 
-  socket.on('joinRoom', ({ senderId, recipientId }) => {
-    socket.join(senderId);
-    socket.join(recipientId);
+  // Join individual room for notification purposes
+  socket.on("joinNotificationRoom", (userId) => {
+    socket.join(userId);
+    console.log("User joined notification room:", userId);
   });
 
+
+  // Join chat rooms for sender & recipient
+  socket.on('join', ({ senderId, recipientId }) => {
+    socket.join(senderId);
+    socket.join(recipientId);
+    console.log(`User joined chat rooms: ${senderId} & ${recipientId}`);
+  });
+
+  // Mark user as online
   socket.on('online', (userId) => {
     socketToUser[socket.id] = userId;
     socket.join(userId);
@@ -401,18 +454,32 @@ io.on('connection', (socket) => {
     io.emit('onlineUsers', onlineUsers);
   });
 
-  socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
-    try {
-      const message = new Message({ senderId, recipientId, text });
-      const savedMessage = await message.save();
-      io.to(senderId).emit('receiveMessage', savedMessage);
-      io.to(recipientId).emit('receiveMessage', savedMessage);
-    } catch (error) {
-      console.error('❌ Failed to save message:', error);
-    }
-  });
+      socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
+      try {
+        // save the message
+        const message = new Message({ senderId, recipientId, text });
+        const savedMessage = await message.save();
 
-  // ✅ NEW: Typing indicator handlers
+        // query the sender's name 
+        const sender = await User.findOne({ email: senderId })
+
+        //preparing message with sender name
+        const messageWithName = {
+          ...savedMessage._doc,
+          senderName: sender?.name
+        };
+
+
+        // Ensure recipientId is explicitly included
+        io.to(senderId).emit('receiveMessage', messageWithName);
+        io.to(recipientId).emit('receiveMessage', messageWithName);
+      } catch (error) {
+        console.error('❌ Error saving message:', error);
+      }
+    });
+
+
+  // Typing indicators
   socket.on('typing', ({ senderId, recipientId }) => {
     io.to(recipientId).emit('typing', { senderId });
   });
@@ -421,16 +488,20 @@ io.on('connection', (socket) => {
     io.to(recipientId).emit('stopTyping', { senderId });
   });
 
+  // Handle disconnect
   socket.on('disconnect', () => {
     const userId = socketToUser[socket.id];
     delete socketToUser[socket.id];
+
     if (userId) {
-      onlineUsers = onlineUsers.filter((u) => u !== userId);
+      onlineUsers = onlineUsers.filter(u => u !== userId);
       io.emit('onlineUsers', onlineUsers);
     }
-    console.log('🔴 A user disconnected:', socket.id);
+
+    console.log('🔴 User disconnected:', socket.id);
   });
 });
+
 
 // Ensure DB connections are ready before starting server
 const waitForConnections = async () => {
@@ -449,293 +520,3 @@ const waitForConnections = async () => {
 
 waitForConnections();
 
-
-// const waitForConnections = async () => {
-//   while (
-//     donationsConnection.readyState !== 1 ||
-//     chatConnection.readyState !== 1
-//   ) {
-//     console.log('⏳ Waiting for DB connections...');
-//     await new Promise(resolve => setTimeout(resolve, 500));
-//   }
-
-//   httpServer.listen(PORT, () => {
-//     console.log(`🚀 Server running at http://localhost:${PORT}`);
-//   });
-// };
-
-// waitForConnections();
-
-
-
-    //for group chat
-  // socket.on('joinRoom', ({ senderId, recipientId }) => {
-  //   socket.join(senderId);
-  //   socket.join(recipientId);
-  // });
-
-  //For one-on-one chat
- 
-
-
-  // socket.on('sendMessage', async ({ senderId, recipientId, text }) => {
-  //   const message = new Message({ senderId, recipientId, text });
-  //   await message.save();
-  //   io.to(recipientId).emit('receiveMessage', message);
-  // });
-
-
-
-
-
-
-
-
-// import express from 'express'
-// import http from 'http'
-// import { Server } from 'socket.io'
-// import cors from 'cors'
-// import dotenv from 'dotenv'
-// import connectDB from './db.js'
-// import Message from './models/Message.js'
-
-// dotenv.config()
-// connectDB()
-
-// const app = express()
-// const server = http.createServer(app)
-
-// const io = new Server(server, {
-//   cors: {
-//     origin: '*',
-//     methods: ['GET', 'POST']
-//   }
-// })
-
-// app.use(cors())
-// app.use(express.json())
-
-// // 🧠 In-memory user tracker (username → socket.id)
-// const onlineUsers = new Map()
-
-// // ✅ API route to check server health
-// app.get('/', (req, res) => {
-//   res.send('🟢 Chat server is live')
-// })
-
-// // ✅ Optional: Fetch message history (sorted oldest → newest)
-// app.get('/messages', async (req, res) => {
-//   try {
-//     const messages = await Message.find().sort({ createdAt: 1 })
-//     res.json(messages)
-//   } catch (err) {
-//     res.status(500).json({ error: 'Failed to load messages' })
-//   }
-// })
-
-// // 💬 Socket.IO chat logic
-// io.on('connection', (socket) => {
-//   console.log('📲 A user connected:', socket.id)
-
-//   // Register user and update user list
-//   socket.on('register', (username) => {
-//     onlineUsers.set(username, socket.id)
-//     console.log(`✅ Registered: ${username} → ${socket.id}`)
-
-//     io.emit('user-list', Array.from(onlineUsers.keys()))
-//   })
-
-//   // Handle private messages
-//   socket.on('private message', async ({ sender, receiver, content }) => {
-//     const newMessage = new Message({ sender, receiver, content })
-//     await newMessage.save()
-
-//     const receiverSocketId = onlineUsers.get(receiver)
-
-//     if (receiverSocketId) {
-//       socket.to(receiverSocketId).emit('private message', newMessage)
-//     }
-
-//     // Also send back to sender for confirmation
-//     socket.emit('private message', newMessage)
-//   })
-
-//   // Handle disconnection and update user list
-//   socket.on('disconnect', () => {
-//     for (let [username, id] of onlineUsers.entries()) {
-//       if (id === socket.id) {
-//         onlineUsers.delete(username)
-//         console.log(`❌ ${username} disconnected`)
-//         break
-//       }
-//     }
-
-//     io.emit('user-list', Array.from(onlineUsers.keys()))
-//   })
-// })
-
-// 🚀 Start server
-// const PORT = process.env.PORT || 3001
-// server.listen(PORT, () => {
-//   console.log(`🚀 Chat server running on http://localhost:${PORT}`)
-// })
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// import express from 'express'
-// import http from 'http'
-// import { Server } from 'socket.io'
-// import cors from 'cors'
-// import dotenv from 'dotenv'
-// import connectDB from './db.js'
-// import Message from './models/Message.js'
-
-// dotenv.config()
-// connectDB()
-
-// const app = express()
-// const server = http.createServer(app)
-
-// const io = new Server(server, {
-//   cors: {
-//     origin: '*',
-//     methods: ['GET', 'POST']
-//   }
-// })
-
-// app.use(cors())
-// app.use(express.json())
-
-// // 👇 Optional API route to get previous messages
-// app.get('/messages', async (req, res) => {
-//   try {
-//     const messages = await Message.find().sort({ createdAt: 1 })
-//     res.json(messages)
-//   } catch (err) {
-//     res.status(500).json({ error: 'Failed to load messages' })
-//   }
-// })
-
-// // 👇 Socket.io chat logic
-// io.on('connection', (socket) => {
-//   console.log('📲 A user connected:', socket.id)
-
-//   socket.on('chat message', async ({ sender, content, receiver }) => {
-//     const newMessage = new Message({ sender, content, receiver })
-//     await newMessage.save()
-
-//     io.emit('chat message', newMessage) // send to all clients
-//   })
-
-//   socket.on('disconnect', () => {
-//     console.log('❌ User disconnected:', socket.id)
-//   })
-// })
-
-// const PORT = process.env.PORT || 3001
-// server.listen(PORT, () => {
-//   console.log(`🚀 Server running on port ${PORT}`)
-// })
