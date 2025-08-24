@@ -12,6 +12,7 @@ import  Request  from './models/Request.js';
 import User from './models/User.js';
 import Message from './models/Message.js';
 import { donationsConnection, chatConnection } from './db.js';
+import mongoose from 'mongoose';
 
 
 dotenv.config();
@@ -186,9 +187,9 @@ const httpServer = http.createServer(async (req, res) => {
                     itemId,
                     foodName,
                     donorEmail,
-                    donorId: donorId || '',
+                    donorId: donorId ? new mongoose.Types.ObjectId(donorId) : null,
                     donorName,
-                    userId: userId || '',
+                    userId: userId ? new mongoose.Types.ObjectId(userId) : null,
                     userEmail,
                     userName,
                     phone,
@@ -235,18 +236,34 @@ const httpServer = http.createServer(async (req, res) => {
             //   : { userEmail: id };
 
             let filter = {}
-            if(type === 'donor'){
-              filter = { donorEmail: id }
+            if(type === 'donor') {
+              filter = mongoose.Types.ObjectId.isValid(id)
+              ? { donorId: new mongoose.Types.ObjectId(id) }
+              : { donorEmail: id }
             }else if(type === 'user'){
-              filter = { userEmail: id }
-            }else if(type === 'both'){
-               filter ={
+              filter = mongoose.Types.ObjectId.isValid(id)
+              ? { userId: new mongoose.Types.ObjectId(id) }
+              : { userEmail: id }
+            } else if(type === 'both') {
+              filter = {
                 $or: [
-                  { donorEmail: id },
-                  { userEmail: id }
+                  mongoose.Types.ObjectId.isValid(id) ? { donorId: new mongoose.Types.ObjectId(id)  } : { donorEmail: id },
+                  mongoose.Types.ObjectId.isValid(id) ? { userId: new mongoose.Types.ObjectId(id) } : { userEmail: id }
                 ]
-               }
+              }
             }
+            // if(type === 'donor'){
+            //   filter = { donorEmail: id }
+            // }else if(type === 'user'){
+            //   filter = { userEmail: id }
+            // }else if(type === 'both'){
+            //    filter ={
+            //     $or: [
+            //       { donorEmail: id },
+            //       { userEmail: id }
+            //     ]
+            //    }
+            // }
 
             try {
               const requests = await Request.find(filter).lean();
