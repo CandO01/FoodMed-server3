@@ -12,7 +12,8 @@ const foodSchema = new mongoose.Schema({
   foodType: String,
   mode: String,
   imageUrl: String,
-  donorId: String,
+
+  donorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   donorName: String,
   donorEmail: String,
   donorPhone: String,

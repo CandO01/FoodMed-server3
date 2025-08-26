@@ -14,6 +14,7 @@ import Message from './models/Message.js';
 import { donationsConnection, chatConnection } from './db.js';
 import mongoose from 'mongoose';
 
+const ObjectId = mongoose.Types.ObjectId;
 
 dotenv.config();
 
@@ -76,6 +77,7 @@ const httpServer = http.createServer(async (req, res) => {
     const buffers = [];
     req.on('data', chunk => buffers.push(chunk));
     req.on('end', async () => {
+      try{
       const boundary = req.headers['content-type'].split('boundary=')[1];
       const rawData = Buffer.concat(buffers).toString('latin1');
       const parts = rawData.split(`--${boundary}`);
@@ -111,6 +113,29 @@ const httpServer = http.createServer(async (req, res) => {
         }
       }
 
+      //   // 🔎 Log what came from the form (temporarily, for debugging)
+      // console.log('POST /submit fields:', fields);
+
+      
+      const userIdRaw = fields.donorId?.trim();
+
+//       console.log("FIELDS RECEIVED:", fields);
+// console.log("userId (raw):", userIdRaw);
+// console.log("userId (JSON):", JSON.stringify(userIdRaw));
+// console.log("userId length:", userIdRaw?.length);
+// console.log("isValid?", ObjectId.isValid(userIdRaw));
+
+
+      if(!userIdRaw || !ObjectId.isValid(userIdRaw)) {
+         res.writeHead(400);
+        return res.end(JSON.stringify({
+          error: 'Invalid donorId. Expected a MongoDB ObjectId string.',
+          received: userIdRaw || '(empty)'
+        }));
+      }
+
+      const userObjectId = new ObjectId(userIdRaw)
+
       const foodData = new Food({
               id: uuidv4(),
               foodName: fields.foodName,
@@ -121,21 +146,25 @@ const httpServer = http.createServer(async (req, res) => {
               foodType: fields.foodType,
               mode: fields.mode,
               imageUrl,
-              donorId: fields.donorId,  // incoming from frontend (passed from auth server)
+              donorId: userObjectId,
               donorName: fields.donorName,
               donorEmail: fields.donorEmail,
-              donorPhone: fields.donorPhone,
+              donorPhone: fields.donorPhone, 
               createdAt: new Date()
             });
 
+          // console.log("Incoming donorIdRaw:", userIdRaw);
+          // console.log("Incoming donorObjectId:", userObjectId);
 
       await foodData.save();
 
       await User.updateOne(
-        { email: fields.donorEmail },
+        { _id: userObjectId },
         { 
           $set: { 
-            name: fields.donorName || fields.donorEmail, 
+            name: fields.donorName || fields.donorEmail,
+            email: fields.donorEmail,
+            phone: fields.donorPhone,
             canDonate: true,
             canRequest: true 
           } 
@@ -143,8 +172,11 @@ const httpServer = http.createServer(async (req, res) => {
         { upsert: true }
       );
 
-      res.writeHead(201);
+      res.writeHead(201, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ message: 'Food uploaded successfully', data: foodData }));
+    }catch(err){
+      
+    }
     });
   }
 
@@ -163,18 +195,33 @@ const httpServer = http.createServer(async (req, res) => {
               phone
             } = await parseJSONBody(req);
 
-              if (!itemId || !foodName || !donorEmail || !userEmail || !phone) {
-                res.writeHead(400);
+              if (!itemId || !foodName || !donorEmail || !userEmail || !phone || !userId) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Missing required fields' }));
                 return;
               }
 
+                // ✅ Ensure requester userId is valid
+              if (!mongoose.Types.ObjectId.isValid(userId)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Invalid requester userId' }));
+              }
+
+              const userObjectId = new mongoose.Types.ObjectId(userId);
+
+                  // ✅ Convert donorId safely (null if invalid)
+                const donorObjectId = donorId && mongoose.Types.ObjectId.isValid(donorId)
+                  ? new mongoose.Types.ObjectId(donorId)
+                  : null;
+
                  // ✅ Save or update the user who is making the request
-              await User.updateOne(
-                { email: userEmail },
+              await User.findOneAndUpdate(
+                { email: userEmail  },
                 { 
                   $set: { 
-                    name: userName || userEmail, email: userEmail, 
+                    name: userName || userEmail,
+                    email: userEmail,
+                    phone,
                     canDonate: true, 
                     canRequest: true 
                   } 
@@ -187,11 +234,11 @@ const httpServer = http.createServer(async (req, res) => {
                     itemId,
                     foodName,
                     donorEmail,
-                    donorId: donorId ? new mongoose.Types.ObjectId(donorId) : null,
+                    donorId: donorObjectId,
                     donorName,
-                    userId: userId ? new mongoose.Types.ObjectId(userId) : null,
+                     userId: userObjectId,
                     userEmail,
-                    userName,
+                    userName: userName || userEmail,
                     phone,
                     status: 'Pending',
                     createdAt: new Date(),
@@ -199,11 +246,12 @@ const httpServer = http.createServer(async (req, res) => {
 
          await newRequest.save();
 
-         // ✅ Notify donor in real-time
-        io.to(donorId).emit("receiveMessage", {
+          // ✅ Notify donor in real-time
+        if (donorObjectId) {io.to(donorId).emit("receiveMessage", {
           senderId: userId,
-          text: `${userName} has requested your food: ${foodName}`
+          text: `${userName || userEmail} has requested your food: ${foodName}`
         });
+      }
 
          io.emit('requestUpdated');
 
